@@ -1,52 +1,27 @@
-// Handles state management, rendering, and user interactions for the
-// front‑end prototype of TheMemes. Posts are persisted to localStorage under
-// the key `thememes_posts`. Each post contains an `id`, a base64 data URL
-// representing the uploaded image, a timestamp (milliseconds since epoch),
-// and a like counter. Sorting and filtering occurs client‑side.
-
 (() => {
-  /**
-   * Reads persisted posts from localStorage. If none exist, returns an
-   * empty array. This function gracefully handles malformed JSON by
-   * resetting the storage to an empty array.
-   * @returns {Array<{id:string,dataUrl:string,timestamp:number,likes:number}>}
-   */
-  function loadPosts() {
-    try {
-      const raw = localStorage.getItem('thememes_posts');
-      if (!raw) return [];
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) return parsed;
-    } catch (e) {
-      console.warn('Failed to parse posts from localStorage:', e);
-    }
-    // Reset on error
-    localStorage.removeItem('thememes_posts');
-    return [];
-  }
+  // Initialize Supabase client
+  const supabaseUrl = 'https://swatstbagrwqwhmdqqck.supabase.co';
+  const supabaseAnonKey = 'sbp_b1665bdc2cc3793ce82dca6af72ddf0333f2d30';
+  const supabaseClient = supabase.createClient(supabaseUrl, supabaseAnonKey);
+
+  // DOM elements
+  const postsContainer = document.getElementById('postsContainer');
+  const fileInput = document.getElementById('fileInput');
+  const uploadBtn = document.getElementById('uploadBtn');
+  const latestTab = document.getElementById('latestTab');
+  const topTab = document.getElementById('topTab');
+
+  // Current view filter: 'latest' or 'top'
+  let currentFilter = 'latest';
 
   /**
-   * Persists a list of posts to localStorage. Swallows exceptions because
-   * browsers may throw (e.g. storage quota) and we don't want the app to
-   * crash. In a production environment you would surface this to the user.
-   * @param {Array} posts
-   */
-  function savePosts(posts) {
-    try {
-      localStorage.setItem('thememes_posts', JSON.stringify(posts));
-    } catch (e) {
-      console.warn('Failed to save posts:', e);
-    }
-  }
-
-  /**
-   * Returns a human‑friendly relative time string like "10 minutes ago" or
-   * "3 hours ago". Falls back to a date string if more than a week has
-   * passed. Times are computed against the current timestamp.
-   * @param {number} timestamp
+   * Generate a human‑friendly relative time string from an ISO date.
+   * Falls back to locale date string if older than a week.
+   * @param {string} dateString ISO timestamp
    * @returns {string}
    */
-  function relativeTime(timestamp) {
+  function relativeTime(dateString) {
+    const timestamp = new Date(dateString).getTime();
     const now = Date.now();
     const diff = now - timestamp;
     const minute = 60 * 1000;
@@ -55,144 +30,141 @@
     if (diff < minute) return 'just now';
     if (diff < hour) {
       const mins = Math.floor(diff / minute);
-      return `${mins} minute${mins !== 1 ? 's' : ''} ago`;
+      return `${mins}${mins !== 1 ? ' mins' : ' min'} ago`;
     }
     if (diff < day) {
       const hrs = Math.floor(diff / hour);
-      return `${hrs} hour${hrs !== 1 ? 's' : ''} ago`;
+      return `${hrs}${hrs !== 1 ? ' hrs' : ' hr'} ago`;
     }
     if (diff < 7 * day) {
       const days = Math.floor(diff / day);
-      return `${days} day${days !== 1 ? 's' : ''} ago`;
+      return `${days}${days !== 1 ? ' days' : ' day'} ago`;
     }
-    // For posts older than a week show a locale date
-    const d = new Date(timestamp);
-    return d.toLocaleDateString();
+    return new Date(dateString).toLocaleDateString();
   }
 
   /**
-   * Renders the list of posts into the DOM. Sorting is based on the
-   * `currentFilter` variable: "latest" sorts by timestamp descending,
-   * "top" sorts by like count descending (breaking ties by timestamp).
+   * Fetch memes from the Supabase "Memes" table.
+   * Orders by created_at for latest or likes for top.
+   * @returns {Promise<Array>}
    */
-  function renderPosts() {
-    const container = document.getElementById('postsContainer');
-    container.innerHTML = '';
-    let posts = loadPosts();
-    if (currentFilter === 'top') {
-      posts = posts.slice().sort((a, b) => {
-        if (b.likes !== a.likes) return b.likes - a.likes;
-        return b.timestamp - a.timestamp;
-      });
+  async function loadPosts() {
+    let query = supabaseClient.from('Memes').select('*');
+    if (currentFilter === 'latest') {
+      query = query.order('created_at', { ascending: false });
     } else {
-      // latest
-      posts = posts.slice().sort((a, b) => b.timestamp - a.timestamp);
+      query = query.order('likes', { ascending: false });
+    }
+    const { data, error } = await query;
+    if (error) {
+      console.error('Error loading posts', error);
+      return [];
+    }
+    return data;
+  }
+
+  /**
+   * Render posts into the DOM. Clears existing content and repopulates.
+   */
+  async function renderPosts() {
+    const posts = await loadPosts();
+    postsContainer.innerHTML = '';
+    if (!posts || posts.length === 0) {
+      postsContainer.innerHTML = '<p class="text-gray-400">No memes found.</p>';
+      return;
     }
     posts.forEach((post) => {
-      const card = document.createElement('article');
-      card.className =
-        'bg-gray-900 rounded-lg overflow-hidden shadow-md max-w-xl mx-auto';
-      // Image container
-      const img = document.createElement('img');
-      img.src = post.dataUrl;
-      img.alt = 'Uploaded meme';
-      img.className = 'w-full object-contain';
-      card.appendChild(img);
-      // Footer with likes and time
-      const footer = document.createElement('div');
-      footer.className =
-        'flex items-center justify-between px-4 py-3 bg-gray-800';
-      // Like button and count
-      const likeBtn = document.createElement('button');
-      likeBtn.className =
-        'flex items-center gap-1 text-pink-400 hover:text-pink-300 focus:outline-none';
-      likeBtn.innerHTML =
-        '<svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 512 512" class="w-5 h-5"><path d="M462.3 62.7C407 7.4 324.8-10 256 32.3 187.2-10 105-7.4 49.7 62.7c-54.5 66.3-46.4 165.6 15.6 221.7L239 470.6a32 32 0 0 0 45.2 0l173.8-186.2c62-56.1 70.1-155.4 4.5-221.7z"/></svg>';
-      const likeCount = document.createElement('span');
-      likeCount.textContent = post.likes;
-      likeBtn.appendChild(likeCount);
-      likeBtn.addEventListener('click', () => {
-        const posts = loadPosts();
-        const idx = posts.findIndex((p) => p.id === post.id);
-        if (idx >= 0) {
-          posts[idx].likes += 1;
-          savePosts(posts);
-          renderPosts();
+      const card = document.createElement('div');
+      card.className = 'my-6';
+      card.innerHTML = `
+        <div class="relative">
+          <img src="${post.url}" alt="meme" class="w-full max-h-96 object-cover rounded-lg border border-gray-700">
+          <button class="absolute bottom-2 left-2 flex items-center space-x-1 text-pink-500 hover:text-pink-400 focus:outline-none">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 20 20" class="w-5 h-5"><path d="M3.172 5.172a4 4 0 015.656 0L10 6.343l1.172-1.171a4 4 0 015.656 5.656L10 17.657l-6.828-6.829a4 4 0 010-5.656z"></path></svg>
+            <span>${post.likes}</span>
+          </button>
+        </div>
+        <p class="mt-1 text-sm text-gray-400">${relativeTime(post.created_at)}</p>
+      `;
+      const likeBtn = card.querySelector('button');
+      likeBtn.addEventListener('click', async () => {
+        // Optimistically update UI
+        const currentLikes = post.likes || 0;
+        likeBtn.querySelector('span').textContent = currentLikes + 1;
+        // Update in Supabase
+        const { data: updated, error } = await supabaseClient
+          .from('Memes')
+          .update({ likes: currentLikes + 1 })
+          .eq('id', post.id)
+          .select()
+          .single();
+        if (!error && updated) {
+          post.likes = updated.likes;
+          likeBtn.querySelector('span').textContent = updated.likes;
+        } else if (error) {
+          console.error('Failed to update likes', error);
+          // revert UI on failure
+          likeBtn.querySelector('span').textContent = currentLikes;
         }
       });
-      footer.appendChild(likeBtn);
-      // Timestamp
-      const time = document.createElement('span');
-      time.className = 'text-gray-400 text-sm';
-      time.textContent = relativeTime(post.timestamp);
-      footer.appendChild(time);
-      card.appendChild(footer);
-      container.appendChild(card);
+      postsContainer.appendChild(card);
     });
   }
 
-  // Keep track of which filter is active
-  let currentFilter = 'latest';
+  // Initial render
+  renderPosts();
 
-  // Event handler for file uploads
-  function handleFileSelect(event) {
-    const file = event.target.files[0];
+  // Show file picker when upload button clicked
+  uploadBtn.addEventListener('click', () => {
+    fileInput.click();
+  });
+
+  // Handle file selection and upload to Supabase
+  fileInput.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const posts = loadPosts();
-      posts.push({
-        id: String(Date.now()),
-        dataUrl: e.target.result,
-        timestamp: Date.now(),
-        likes: 0,
-      });
-      savePosts(posts);
-      // Reset file input value to allow uploading the same file again
-      event.target.value = '';
-      // Switch to "latest" after upload
-      selectFilter('latest');
-    };
-    reader.readAsDataURL(file);
-  }
-
-  /**
-   * Highlights the selected tab and re-renders posts. Acceptable values are
-   * 'latest' and 'top'. Any other value is ignored.
-   * @param {string} filter
-   */
-  function selectFilter(filter) {
-    if (filter !== 'latest' && filter !== 'top') return;
-    currentFilter = filter;
-    // Update button styles
-    const latestBtn = document.getElementById('latestTab');
-    const topBtn = document.getElementById('topTab');
-    if (filter === 'latest') {
-      latestBtn.classList.add('text-yellow-400', 'border-b-2', 'border-yellow-400');
-      latestBtn.classList.remove('text-gray-400');
-      topBtn.classList.remove('text-yellow-400', 'border-b-2', 'border-yellow-400');
-      topBtn.classList.add('text-gray-400');
-    } else {
-      topBtn.classList.add('text-yellow-400', 'border-b-2', 'border-yellow-400');
-      topBtn.classList.remove('text-gray-400');
-      latestBtn.classList.remove('text-yellow-400', 'border-b-2', 'border-yellow-400');
-      latestBtn.classList.add('text-gray-400');
+    // Reset input value to allow uploading the same file again later
+    e.target.value = '';
+    const filePath = `${Date.now()}_${file.name}`;
+    const { error: uploadError } = await supabaseClient.storage
+      .from('memes')
+      .upload(filePath, file);
+    if (uploadError) {
+      alert('Upload failed: ' + uploadError.message);
+      return;
     }
-    renderPosts();
-  }
+    const { data: urlData, error: urlError } = await supabaseClient.storage
+      .from('memes')
+      .getPublicUrl(filePath);
+    if (urlError) {
+      alert('Failed to get public URL: ' + urlError.message);
+      return;
+    }
+    const publicUrl = urlData.publicUrl;
+    // Insert record into table
+    const { error: insertError } = await supabaseClient
+      .from('Memes')
+      .insert([{ url: publicUrl, likes: 0 }]);
+    if (insertError) {
+      alert('Failed to save meme: ' + insertError.message);
+      return;
+    }
+    // Refresh feed after successful upload
+    await renderPosts();
+  });
 
-  // Setup event listeners after DOM has loaded
-  document.addEventListener('DOMContentLoaded', () => {
-    const fileInput = document.getElementById('fileInput');
-    const uploadBtn = document.getElementById('uploadBtn');
-    const latestBtn = document.getElementById('latestTab');
-    const topBtn = document.getElementById('topTab');
-    // Bind events
-    fileInput.addEventListener('change', handleFileSelect);
-    uploadBtn.addEventListener('click', () => fileInput.click());
-    latestBtn.addEventListener('click', () => selectFilter('latest'));
-    topBtn.addEventListener('click', () => selectFilter('top'));
-    // Initial render
+  // Tab click handlers
+  latestTab.addEventListener('click', () => {
+    currentFilter = 'latest';
+    latestTab.classList.add('text-yellow-400', 'border-b-2', 'border-yellow-400');
+    topTab.classList.remove('text-yellow-400', 'border-b-2', 'border-yellow-400');
+    renderPosts();
+  });
+
+  topTab.addEventListener('click', () => {
+    currentFilter = 'top';
+    topTab.classList.add('text-yellow-400', 'border-b-2', 'border-yellow-400');
+    latestTab.classList.remove('text-yellow-400', 'border-b-2', 'border-yellow-400');
     renderPosts();
   });
 })();
